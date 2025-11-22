@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Five Crowns: Neural Net</title>
+    <title>Five Crowns: Debug Mode</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -11,11 +11,8 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <style>
         body { overscroll-behavior-y: none; background-color: #0f172a; color: white; }
-        video { transform: scaleX(1); /* Change to -1 if using selfie cam */ }
-        .scan-region {
-            border: 4px solid #eab308;
-            box-shadow: 0 0 20px rgba(234, 179, 8, 0.5);
-        }
+        video { transform: scaleX(1); }
+        .scan-region { border: 4px solid #eab308; box-shadow: 0 0 20px rgba(234, 179, 8, 0.5); }
     </style>
 </head>
 <body>
@@ -32,160 +29,139 @@
             const [confidence, setConfidence] = useState(0);
             const [isLoading, setIsLoading] = useState(true);
             const [error, setError] = useState('');
-            const [score, setScore] = useState(0);
+            const [debugInfo, setDebugInfo] = useState('Initializing...');
             const [cards, setCards] = useState([]);
 
-            // 1. LOAD MODEL
             useEffect(() => {
                 async function loadAssets() {
                     try {
-                        console.log("Loading model...");
-                        // Load the model.json from the relative path
-                        const loadedModel = await tf.loadLayersModel('./model/model.json');
-                        setModel(loadedModel);
+                        // 1. Construct the ABSOLUTE path to avoid relative path confusion
+                        let baseUrl = window.location.href;
+                        if (baseUrl.endsWith('index.html')) {
+                            baseUrl = baseUrl.replace('index.html', '');
+                        }
+                        if (!baseUrl.endsWith('/')) {
+                            baseUrl += '/';
+                        }
                         
-                        // Load the class names (metadata.json)
-                        const metaRes = await fetch('./model/metadata.json');
+                        const modelUrl = baseUrl + 'model/model.json';
+                        const metaUrl = baseUrl + 'model/metadata.json';
+                        
+                        setDebugInfo(`Attempting to load from: ${modelUrl}`);
+
+                        // 2. Fetch Metadata First to test connectivity
+                        const metaRes = await fetch(metaUrl);
+                        if (!metaRes.ok) throw new Error(`Metadata fetch failed: ${metaRes.status} ${metaRes.statusText}`);
                         const metaData = await metaRes.json();
                         setLabels(metaData.labels);
+
+                        // 3. Load Model
+                        const loadedModel = await tf.loadLayersModel(modelUrl);
+                        setModel(loadedModel);
                         
                         setIsLoading(false);
                         startCamera();
                     } catch (err) {
-                        setError("Failed to load model. Make sure 'model' folder exists and you are using a local server (not file://).");
+                        // PRINT THE ACTUAL ERROR
                         console.error(err);
+                        setError(`${err.message}`);
+                        setDebugInfo(prev => prev + `\nFAILED. Check console for details.`);
                     }
                 }
                 loadAssets();
             }, []);
 
-            // 2. START CAMERA
             const startCamera = async () => {
                 if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                    const stream = await navigator.mediaDevices.getUserMedia({ 
-                        video: { facingMode: "environment" } 
-                    });
-                    if (videoRef.current) {
-                        videoRef.current.srcObject = stream;
-                        // Start prediction loop once video is playing
-                        videoRef.current.onloadedmetadata = () => {
-                            videoRef.current.play();
-                            requestAnimationFrame(predictLoop);
-                        };
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                        if (videoRef.current) {
+                            videoRef.current.srcObject = stream;
+                            videoRef.current.onloadedmetadata = () => {
+                                videoRef.current.play();
+                                requestAnimationFrame(predictLoop);
+                            };
+                        }
+                    } catch (e) {
+                        setError("Camera access denied. Please allow camera permissions.");
                     }
                 }
             };
 
-            // 3. PREDICTION LOOP (Real-time)
             const predictLoop = async () => {
                 if (!videoRef.current || !model) return;
-
-                // Use tf.tidy to clean up tensors immediately to prevent memory leaks
                 const result = tf.tidy(() => {
-                    // Get image from video
                     const img = tf.browser.fromPixels(videoRef.current);
-                    
-                    // Crop center square (Assuming portrait mode, crop center)
                     const [h, w] = img.shape;
                     const size = Math.min(h, w);
                     const startH = (h - size) / 2;
                     const startW = (w - size) / 2;
                     const cropped = img.slice([startH, startW, 0], [size, size, 3]);
-
-                    // Resize to 224x224 (Model input size)
                     const resized = tf.image.resizeBilinear(cropped, [224, 224]);
-                    
-                    // Normalize [-1, 1] (MobileNetV2 expectation)
                     const normalized = resized.toFloat().div(127.5).sub(1);
-                    
-                    // Expand dims to batch [1, 224, 224, 3]
-                    const batched = normalized.expandDims(0);
-
-                    // Predict
-                    return model.predict(batched);
+                    return model.predict(normalized.expandDims(0));
                 });
 
-                // Extract data from tensor
                 const probs = await result.data();
-                result.dispose(); // Cleanup output tensor
-
-                // Find highest probability
+                result.dispose();
                 const maxProb = Math.max(...probs);
                 const classIndex = probs.indexOf(maxProb);
                 
-                // Update UI if confidence is decent (> 85%)
                 if (maxProb > 0.85) {
-                    setPrediction(labels[classIndex]); // e.g., "Green_8"
+                    setPrediction(labels[classIndex]);
                     setConfidence(maxProb);
                 } else {
-                    setConfidence(maxProb); // Show low confidence
+                    setConfidence(maxProb);
                 }
-
-                // Loop
                 requestAnimationFrame(predictLoop);
             };
 
             const addCurrentCard = () => {
                 if (!prediction) return;
-                // Parse "Green_8" into {color: Green, rank: 8}
                 const parts = prediction.split('_');
-                let rank = parts[1] || parts[0]; // Handle "Joker"
+                let rank = parts[1] || parts[0];
                 let color = parts.length > 1 ? parts[0] : "Special";
-                
-                const newCard = { id: Date.now(), rank, color, raw: prediction };
-                setCards(prev => [newCard, ...prev]);
+                setCards(prev => [{ id: Date.now(), rank, color, raw: prediction }, ...prev]);
             };
 
             return (
-                <div className="h-screen flex flex-col">
-                    {/* CAMERA VIEW */}
+                <div className="h-screen flex flex-col font-mono">
                     <div className="relative flex-1 bg-black overflow-hidden flex justify-center items-center">
-                        <video 
-                            ref={videoRef} 
-                            className="absolute min-w-full min-h-full object-cover opacity-60" 
-                            playsInline 
-                            muted 
-                        />
+                        <video ref={videoRef} className="absolute min-w-full min-h-full object-cover opacity-60" playsInline muted />
                         
-                        {/* Targeting Box */}
-                        <div className="relative z-10 w-64 h-64 scan-region rounded-xl flex flex-col items-center justify-center">
-                             {isLoading && <div className="text-yellow-400 font-bold animate-pulse">Loading Model...</div>}
-                             {error && <div className="text-red-500 font-bold text-center p-2 bg-black/80">{error}</div>}
+                        {/* Targeting Box / Error Display */}
+                        <div className="relative z-10 w-64 h-64 scan-region rounded-xl flex flex-col items-center justify-center p-4 text-center">
+                             {isLoading && !error && <div className="text-yellow-400 font-bold animate-pulse">Loading...</div>}
+                             
+                             {/* DETAILED ERROR MESSAGE */}
+                             {error && (
+                                <div className="bg-red-900/90 text-white p-2 rounded text-xs border border-red-500 break-words w-full">
+                                    <strong>ERROR:</strong><br/>
+                                    {error}<br/><br/>
+                                    <span className="text-[10px] text-red-300">{debugInfo}</span>
+                                </div>
+                             )}
                         </div>
 
-                        {/* Prediction HUD */}
+                        {/* HUD */}
                         <div className="absolute bottom-4 z-20 w-full px-4">
-                            <div className="bg-slate-900/90 p-4 rounded-2xl border border-slate-700 shadow-2xl text-center">
-                                <div className="text-xs uppercase text-slate-400 mb-1 tracking-widest">AI Sees:</div>
+                            <div className="bg-slate-900/90 p-4 rounded-2xl border border-slate-700 text-center">
                                 <div className="text-3xl font-black text-white mb-1">
-                                    {prediction ? prediction.replace('_', ' ') : "..."}
+                                    {prediction ? prediction.replace('_', ' ') : "Scanning..."}
                                 </div>
-                                <div className="h-2 w-full bg-slate-700 rounded-full overflow-hidden">
-                                    <div 
-                                        className={`h-full transition-all duration-100 ${confidence > 0.9 ? 'bg-green-500' : 'bg-yellow-500'}`} 
-                                        style={{width: `${confidence * 100}%`}}
-                                    ></div>
-                                </div>
-                                <div className="text-xs text-right text-slate-500 mt-1">{(confidence * 100).toFixed(0)}% confident</div>
+                                <div className="text-xs text-slate-500">{(confidence * 100).toFixed(0)}% confident</div>
                             </div>
                         </div>
                     </div>
 
-                    {/* CONTROLS */}
                     <div className="h-1/3 bg-slate-900 p-4 flex flex-col">
-                        <button 
-                            onClick={addCurrentCard}
-                            disabled={confidence < 0.85}
-                            className="w-full bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 disabled:bg-slate-700 text-slate-900 font-bold py-4 rounded-xl text-xl shadow-lg mb-4 transition-all"
-                        >
+                        <button onClick={addCurrentCard} disabled={confidence < 0.85} className="w-full bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 disabled:bg-slate-700 text-slate-900 font-bold py-4 rounded-xl text-xl shadow-lg mb-4">
                             ADD CARD
                         </button>
-
                         <div className="flex-1 overflow-y-auto space-y-2">
-                            <h3 className="text-xs font-bold text-slate-500 uppercase">Scanned Cards ({cards.length})</h3>
-                            {cards.map(c => (
-                                <div key={c.id} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700">
-                                    <span className="font-bold">{c.raw.replace('_', ' ')}</span>
+                             {cards.map(c => (
+                                <div key={c.id} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700 text-xs">
+                                    <span className="font-bold">{c.raw}</span>
                                     <button onClick={() => setCards(prev => prev.filter(x => x.id !== c.id))} className="text-red-400">✕</button>
                                 </div>
                             ))}
