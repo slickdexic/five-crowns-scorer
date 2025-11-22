@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Five Crowns: Graph Model</title>
+    <title>Five Crowns AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -11,8 +11,6 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <style>
         body { overscroll-behavior-y: none; background-color: #0f172a; color: white; }
-        video { transform: scaleX(1); }
-        .scan-region { border: 4px solid #eab308; box-shadow: 0 0 20px rgba(234, 179, 8, 0.5); }
     </style>
 </head>
 <body>
@@ -21,18 +19,27 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
+        const ROUNDS = [
+            { cards: 3, wild: 3, label: "3s Wild" }, { cards: 4, wild: 4, label: "4s Wild" },
+            { cards: 5, wild: 5, label: "5s Wild" }, { cards: 6, wild: 6, label: "6s Wild" },
+            { cards: 7, wild: 7, label: "7s Wild" }, { cards: 8, wild: 8, label: "8s Wild" },
+            { cards: 9, wild: 9, label: "9s Wild" }, { cards: 10, wild: 10, label: "10s Wild" },
+            { cards: 11, wild: 11, label: "Jacks Wild" }, { cards: 12, wild: 12, label: "Queens Wild" },
+            { cards: 13, wild: 13, label: "Kings Wild" },
+        ];
+
         function App() {
             const videoRef = useRef(null);
             const [model, setModel] = useState(null);
             const [labels, setLabels] = useState([]);
-            const [prediction, setPrediction] = useState(null);
-            const [confidence, setConfidence] = useState(0);
-            const [isLoading, setIsLoading] = useState(true);
-            const [error, setError] = useState('');
-            const [cards, setCards] = useState([]);
+            const [roundIdx, setRoundIdx] = useState(0);
+            const [hand, setHand] = useState([]);
+            const [totalScore, setTotalScore] = useState(0);
+            const [status, setStatus] = useState("Loading AI...");
+            const [isScanning, setIsScanning] = useState(false);
 
             useEffect(() => {
-                async function loadAssets() {
+                async function load() {
                     try {
                         let baseUrl = window.location.href.replace('index.html', '');
                         if (!baseUrl.endsWith('/')) baseUrl += '/';
@@ -40,115 +47,157 @@
                         const modelUrl = baseUrl + 'model/model.json';
                         const metaUrl = baseUrl + 'model/metadata.json';
                         
-                        // 1. Fetch Metadata
+                        // 1. Labels
                         const metaRes = await fetch(metaUrl);
-                        if (!metaRes.ok) throw new Error(`Metadata fetch failed: ${metaRes.status}`);
+                        if(!metaRes.ok) throw new Error("Metadata missing");
                         const metaData = await metaRes.json();
                         setLabels(metaData.labels);
 
-                        // 2. Load Graph Model (The Modern Way)
-                        // Note: loadGraphModel instead of loadLayersModel
+                        // 2. Load Graph Model (New Format)
                         const loadedModel = await tf.loadGraphModel(modelUrl);
                         setModel(loadedModel);
-                        
-                        setIsLoading(false);
+                        setStatus("Ready");
                         startCamera();
-                    } catch (err) {
-                        console.error(err);
-                        setError(err.message);
+                    } catch (e) {
+                        setStatus("Error: " + e.message);
                     }
                 }
-                loadAssets();
+                load();
             }, []);
 
             const startCamera = async () => {
                 if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                    try {
-                        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-                        if (videoRef.current) {
-                            videoRef.current.srcObject = stream;
-                            videoRef.current.onloadedmetadata = () => {
-                                videoRef.current.play();
-                                requestAnimationFrame(predictLoop);
-                            };
-                        }
-                    } catch (e) {
-                        setError("Camera permission denied");
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        videoRef.current.play();
                     }
                 }
             };
 
-            const predictLoop = async () => {
-                if (!videoRef.current || !model) return;
-                
-                const result = tf.tidy(() => {
-                    const img = tf.browser.fromPixels(videoRef.current);
-                    const [h, w] = img.shape;
-                    const size = Math.min(h, w);
-                    const startH = (h - size) / 2;
-                    const startW = (w - size) / 2;
-                    const cropped = img.slice([startH, startW, 0], [size, size, 3]);
-                    const resized = tf.image.resizeBilinear(cropped, [224, 224]);
-                    const normalized = resized.toFloat().div(127.5).sub(1);
-                    
-                    // Graph models expect inputs in a specific way, usually generic execution
-                    return model.predict(normalized.expandDims(0));
-                });
+            const capture = async () => {
+                if (!model || !videoRef.current || isScanning) return;
+                setIsScanning(true);
+                setStatus("Analyzing...");
 
-                const probs = await result.data();
-                result.dispose();
-                
-                const maxProb = Math.max(...probs);
-                const classIndex = probs.indexOf(maxProb);
-                
-                if (maxProb > 0.85) {
-                    setPrediction(labels[classIndex]);
-                    setConfidence(maxProb);
-                } else {
-                    setConfidence(maxProb);
-                }
-                requestAnimationFrame(predictLoop);
+                // Small delay to let UI update
+                setTimeout(async () => {
+                    const prediction = tf.tidy(() => {
+                        const img = tf.browser.fromPixels(videoRef.current);
+                        const [h, w] = img.shape;
+                        const size = Math.min(h, w);
+                        const cropped = img.slice([(h-size)/2, (w-size)/2, 0], [size, size, 3]);
+                        const resized = tf.image.resizeBilinear(cropped, [224, 224]);
+                        const normalized = resized.toFloat().div(127.5).sub(1);
+                        
+                        // Graph models use execute/predict
+                        return model.predict(normalized.expandDims(0));
+                    });
+
+                    const probs = await prediction.data();
+                    prediction.dispose();
+
+                    const maxProb = Math.max(...probs);
+                    const classIdx = probs.indexOf(maxProb);
+                    const label = labels[classIdx];
+
+                    if (maxProb > 0.70) {
+                        addCard(label);
+                        setStatus(`Added: ${label.replace('_', ' ')}`);
+                    } else {
+                        setStatus("Not clear. Try closer.");
+                    }
+                    setIsScanning(false);
+                }, 50);
             };
 
-            const addCurrentCard = () => {
-                if (!prediction) return;
-                const parts = prediction.split('_');
-                let rank = parts[1] || parts[0];
-                let color = parts.length > 1 ? parts[0] : "Special";
-                setCards(prev => [{ id: Date.now(), rank, color, raw: prediction }, ...prev]);
+            const addCard = (label) => {
+                const parts = label.split('_');
+                let rankStr = parts[1] || parts[0];
+                let suit = parts.length > 1 ? parts[0] : "Special";
+                
+                let rankVal = parseInt(rankStr) || 0;
+                if(rankStr === "Joker") rankVal = 50;
+                if(["K","King"].includes(rankStr)) rankVal = 13;
+                if(["Q","Queen"].includes(rankStr)) rankVal = 12;
+                if(["J","Jack"].includes(rankStr)) rankVal = 11;
+
+                setHand(prev => [{ id: Date.now(), raw: label, rankVal, display: rankStr, suit }, ...prev]);
             };
+
+            const currentRound = ROUNDS[roundIdx];
+            const handScore = hand.reduce((acc, c) => {
+                if (c.rankVal === 50) return acc + 50;
+                if (c.rankVal === currentRound.wild) return acc + 20;
+                return acc + c.rankVal;
+            }, 0);
 
             return (
-                <div className="h-screen flex flex-col font-mono">
-                    <div className="relative flex-1 bg-black overflow-hidden flex justify-center items-center">
-                        <video ref={videoRef} className="absolute min-w-full min-h-full object-cover opacity-60" playsInline muted />
-                        
-                        <div className="relative z-10 w-64 h-64 scan-region rounded-xl flex flex-col items-center justify-center p-4 text-center">
-                             {isLoading && !error && <div className="text-yellow-400 font-bold animate-pulse">Loading Graph Model...</div>}
-                             {error && <div className="bg-red-900/90 text-white p-2 rounded text-xs border border-red-500 w-full">{error}</div>}
+                <div className="h-screen flex flex-col font-sans">
+                    {/* Score Header */}
+                    <div className="bg-slate-900 p-4 flex justify-between items-center shadow-lg z-20">
+                        <div>
+                            <div className="text-[10px] uppercase text-slate-400 font-bold">Total Score</div>
+                            <div className="text-3xl font-black text-yellow-400">{totalScore + handScore}</div>
                         </div>
-
-                        <div className="absolute bottom-4 z-20 w-full px-4">
-                            <div className="bg-slate-900/90 p-4 rounded-2xl border border-slate-700 text-center">
-                                <div className="text-3xl font-black text-white mb-1">
-                                    {prediction ? prediction.replace('_', ' ') : "Scanning..."}
-                                </div>
-                                <div className="text-xs text-slate-500">{(confidence * 100).toFixed(0)}% confident</div>
-                            </div>
+                         <div className="text-right">
+                            <div className="text-[10px] uppercase text-slate-400 font-bold">Round {roundIdx + 1}</div>
+                            <div className="text-xl font-bold text-white">{currentRound.label}</div>
                         </div>
                     </div>
 
-                    <div className="h-1/3 bg-slate-900 p-4 flex flex-col">
-                        <button onClick={addCurrentCard} disabled={confidence < 0.85} className="w-full bg-yellow-500 hover:bg-yellow-400 disabled:opacity-50 disabled:bg-slate-700 text-slate-900 font-bold py-4 rounded-xl text-xl shadow-lg mb-4">
-                            ADD CARD
-                        </button>
-                        <div className="flex-1 overflow-y-auto space-y-2">
-                             {cards.map(c => (
-                                <div key={c.id} className="flex justify-between items-center bg-slate-800 p-3 rounded border border-slate-700 text-xs">
-                                    <span className="font-bold">{c.raw}</span>
-                                    <button onClick={() => setCards(prev => prev.filter(x => x.id !== c.id))} className="text-red-400">✕</button>
-                                </div>
-                            ))}
+                    {/* Camera View */}
+                    <div className="relative flex-1 bg-black overflow-hidden flex flex-col justify-center items-center">
+                        <video ref={videoRef} className="absolute min-w-full min-h-full object-cover opacity-80" playsInline muted />
+                        
+                        <div className="relative z-10 w-64 h-64 border-4 border-yellow-400/30 rounded-xl flex items-center justify-center">
+                            {isScanning && <div className="text-yellow-400 font-bold animate-pulse text-2xl">SCANNING</div>}
+                        </div>
+                        
+                        <div className="absolute top-4 bg-black/60 px-3 py-1 rounded-full text-xs text-white backdrop-blur-md z-10">
+                            {status}
+                        </div>
+                    </div>
+
+                    {/* Controls */}
+                    <div className="h-[35%] bg-slate-900 flex flex-col">
+                        <div className="p-4 -mt-6 z-20">
+                            <button 
+                                onClick={capture}
+                                disabled={isScanning}
+                                className="w-full bg-yellow-500 hover:bg-yellow-400 text-slate-900 font-black text-xl py-4 rounded-2xl shadow-xl transition-transform active:scale-95 flex items-center justify-center gap-2"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+                                SNAP & ADD
+                            </button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-2">
+                            {hand.length === 0 && <div className="text-center text-slate-600 text-xs mt-4">Snap a card to add it to your hand.</div>}
+                            {hand.map(card => {
+                                const isWild = card.rankVal === currentRound.wild;
+                                return (
+                                    <div key={card.id} className={`flex justify-between items-center p-3 rounded-xl border ${isWild ? 'bg-yellow-900/20 border-yellow-600 text-yellow-100' : 'bg-slate-800 border-slate-700 text-white'}`}>
+                                        <div className="flex items-center gap-3">
+                                            <span className="font-bold text-lg">{card.display}</span>
+                                            <span className="text-xs uppercase opacity-60">{card.suit}</span>
+                                            {isWild && <span className="bg-yellow-500 text-slate-900 text-[10px] font-bold px-1 rounded">WILD</span>}
+                                        </div>
+                                        <button onClick={() => setHand(h => h.filter(x => x.id !== card.id))} className="text-red-400 p-1">✕</button>
+                                    </div>
+                                )
+                            })}
+                        </div>
+                        
+                        <div className="p-2 border-t border-slate-800 flex justify-between">
+                             <button onClick={() => {setTotalScore(0); setHand([]); setRoundIdx(0);}} className="text-xs text-slate-500 underline">Reset Game</button>
+                             <button onClick={() => {
+                                 if(confirm("Confirm round complete?")) {
+                                     setTotalScore(s => s + handScore);
+                                     setHand([]);
+                                     setRoundIdx(r => Math.min(r+1, 10));
+                                 }
+                             }} className="text-xs font-bold text-green-400 uppercase">Next Round →</button>
                         </div>
                     </div>
                 </div>
