@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Five Crowns: Debug Mode</title>
+    <title>Five Crowns: Graph Model</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -29,43 +29,33 @@
             const [confidence, setConfidence] = useState(0);
             const [isLoading, setIsLoading] = useState(true);
             const [error, setError] = useState('');
-            const [debugInfo, setDebugInfo] = useState('Initializing...');
             const [cards, setCards] = useState([]);
 
             useEffect(() => {
                 async function loadAssets() {
                     try {
-                        // 1. Construct the ABSOLUTE path to avoid relative path confusion
-                        let baseUrl = window.location.href;
-                        if (baseUrl.endsWith('index.html')) {
-                            baseUrl = baseUrl.replace('index.html', '');
-                        }
-                        if (!baseUrl.endsWith('/')) {
-                            baseUrl += '/';
-                        }
+                        let baseUrl = window.location.href.replace('index.html', '');
+                        if (!baseUrl.endsWith('/')) baseUrl += '/';
                         
                         const modelUrl = baseUrl + 'model/model.json';
                         const metaUrl = baseUrl + 'model/metadata.json';
                         
-                        setDebugInfo(`Attempting to load from: ${modelUrl}`);
-
-                        // 2. Fetch Metadata First to test connectivity
+                        // 1. Fetch Metadata
                         const metaRes = await fetch(metaUrl);
-                        if (!metaRes.ok) throw new Error(`Metadata fetch failed: ${metaRes.status} ${metaRes.statusText}`);
+                        if (!metaRes.ok) throw new Error(`Metadata fetch failed: ${metaRes.status}`);
                         const metaData = await metaRes.json();
                         setLabels(metaData.labels);
 
-                        // 3. Load Model
-                        const loadedModel = await tf.loadLayersModel(modelUrl);
+                        // 2. Load Graph Model (The Modern Way)
+                        // Note: loadGraphModel instead of loadLayersModel
+                        const loadedModel = await tf.loadGraphModel(modelUrl);
                         setModel(loadedModel);
                         
                         setIsLoading(false);
                         startCamera();
                     } catch (err) {
-                        // PRINT THE ACTUAL ERROR
                         console.error(err);
-                        setError(`${err.message}`);
-                        setDebugInfo(prev => prev + `\nFAILED. Check console for details.`);
+                        setError(err.message);
                     }
                 }
                 loadAssets();
@@ -83,13 +73,14 @@
                             };
                         }
                     } catch (e) {
-                        setError("Camera access denied. Please allow camera permissions.");
+                        setError("Camera permission denied");
                     }
                 }
             };
 
             const predictLoop = async () => {
                 if (!videoRef.current || !model) return;
+                
                 const result = tf.tidy(() => {
                     const img = tf.browser.fromPixels(videoRef.current);
                     const [h, w] = img.shape;
@@ -99,11 +90,14 @@
                     const cropped = img.slice([startH, startW, 0], [size, size, 3]);
                     const resized = tf.image.resizeBilinear(cropped, [224, 224]);
                     const normalized = resized.toFloat().div(127.5).sub(1);
+                    
+                    // Graph models expect inputs in a specific way, usually generic execution
                     return model.predict(normalized.expandDims(0));
                 });
 
                 const probs = await result.data();
                 result.dispose();
+                
                 const maxProb = Math.max(...probs);
                 const classIndex = probs.indexOf(maxProb);
                 
@@ -129,21 +123,11 @@
                     <div className="relative flex-1 bg-black overflow-hidden flex justify-center items-center">
                         <video ref={videoRef} className="absolute min-w-full min-h-full object-cover opacity-60" playsInline muted />
                         
-                        {/* Targeting Box / Error Display */}
                         <div className="relative z-10 w-64 h-64 scan-region rounded-xl flex flex-col items-center justify-center p-4 text-center">
-                             {isLoading && !error && <div className="text-yellow-400 font-bold animate-pulse">Loading...</div>}
-                             
-                             {/* DETAILED ERROR MESSAGE */}
-                             {error && (
-                                <div className="bg-red-900/90 text-white p-2 rounded text-xs border border-red-500 break-words w-full">
-                                    <strong>ERROR:</strong><br/>
-                                    {error}<br/><br/>
-                                    <span className="text-[10px] text-red-300">{debugInfo}</span>
-                                </div>
-                             )}
+                             {isLoading && !error && <div className="text-yellow-400 font-bold animate-pulse">Loading Graph Model...</div>}
+                             {error && <div className="bg-red-900/90 text-white p-2 rounded text-xs border border-red-500 w-full">{error}</div>}
                         </div>
 
-                        {/* HUD */}
                         <div className="absolute bottom-4 z-20 w-full px-4">
                             <div className="bg-slate-900/90 p-4 rounded-2xl border border-slate-700 text-center">
                                 <div className="text-3xl font-black text-white mb-1">
